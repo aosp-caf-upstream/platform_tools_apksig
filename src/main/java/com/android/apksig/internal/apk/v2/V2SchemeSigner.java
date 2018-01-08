@@ -17,10 +17,11 @@
 package com.android.apksig.internal.apk.v2;
 
 import com.android.apksig.internal.util.ChainedDataSource;
-import com.android.apksig.internal.util.MessageDigestSink;
 import com.android.apksig.internal.util.Pair;
 import com.android.apksig.internal.util.VerityTreeBuilder;
 import com.android.apksig.internal.zip.ZipUtils;
+import com.android.apksig.util.DataSink;
+import com.android.apksig.util.DataSinks;
 import com.android.apksig.util.DataSource;
 import com.android.apksig.util.DataSources;
 import java.io.IOException;
@@ -318,7 +319,7 @@ public abstract class V2SchemeSigner {
             mds[i] = MessageDigest.getInstance(jcaAlgorithm);
         }
 
-        MessageDigestSink mdSink = new MessageDigestSink(mds);
+        DataSink mdSink = DataSinks.asDataSink(mds);
         byte[] chunkContentPrefix = new byte[5];
         chunkContentPrefix[0] = (byte) 0xa5;
         int chunkIndex = 0;
@@ -440,10 +441,10 @@ public abstract class V2SchemeSigner {
 
         ByteBuffer result = ByteBuffer.allocate(resultSize);
         result.order(ByteOrder.LITTLE_ENDIAN);
-        long blockSizeFieldValue = resultSize - 8;
+        long blockSizeFieldValue = resultSize - 8L;
         result.putLong(blockSizeFieldValue);
 
-        long pairSizeFieldValue = 4 + apkSignatureSchemeV2Block.length;
+        long pairSizeFieldValue = 4L + apkSignatureSchemeV2Block.length;
         result.putLong(pairSizeFieldValue);
         result.putInt(APK_SIGNATURE_SCHEME_V2_BLOCK_ID);
         result.put(apkSignatureSchemeV2Block);

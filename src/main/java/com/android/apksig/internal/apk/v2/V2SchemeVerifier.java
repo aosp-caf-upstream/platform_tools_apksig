@@ -19,10 +19,10 @@ package com.android.apksig.internal.apk.v2;
 import com.android.apksig.ApkVerifier.Issue;
 import com.android.apksig.ApkVerifier.IssueWithParams;
 import com.android.apksig.apk.ApkFormatException;
+import com.android.apksig.apk.ApkSigningBlockNotFoundException;
 import com.android.apksig.apk.ApkUtils;
 import com.android.apksig.internal.util.ByteBufferDataSource;
 import com.android.apksig.internal.util.GuaranteedEncodedFormX509Certificate;
-import com.android.apksig.internal.util.Pair;
 import com.android.apksig.internal.zip.ZipUtils;
 import com.android.apksig.util.DataSource;
 import java.io.ByteArrayInputStream;
@@ -63,10 +63,6 @@ import java.util.stream.Collectors;
  */
 public abstract class V2SchemeVerifier {
 
-    private static final long APK_SIG_BLOCK_MAGIC_HI = 0x3234206b636f6c42L;
-    private static final long APK_SIG_BLOCK_MAGIC_LO = 0x20676953204b5041L;
-    private static final int APK_SIG_BLOCK_MIN_SIZE = 32;
-
     private static final int APK_SIGNATURE_SCHEME_V2_BLOCK_ID = 0x7109871a;
 
     /** Hidden constructor to prevent instantiation. */
@@ -74,8 +70,15 @@ public abstract class V2SchemeVerifier {
 
     /**
      * Verifies the provided APK's APK Signature Scheme v2 signatures and returns the result of
-     * verification. APK is considered verified only if {@link Result#verified} is {@code true}. If
-     * verification fails, the result will contain errors -- see {@link Result#getErrors()}.
+     * verification. The APK must be considered verified only if {@link Result#verified} is
+     * {@code true}. If verification fails, the result will contain errors -- see
+     * {@link Result#getErrors()}.
+     *
+     * <p>Verification succeeds iff the APK's APK Signature Scheme v2 signatures are expected to
+     * verify on all Android platform versions in the {@code [minSdkVersion, maxSdkVersion]} range.
+     * If the APK's signature is expected to not verify on any of the specified platform versions,
+     * this method returns a result with one or more errors and whose
+     * {@code Result.verified == false}, or this method throws an exception.
      *
      * @throws ApkFormatException if the APK is malformed
      * @throws NoSuchAlgorithmException if the APK's signatures cannot be verified because a
@@ -109,7 +112,11 @@ public abstract class V2SchemeVerifier {
     /**
      * Verifies the provided APK's v2 signatures and outputs the results into the provided
      * {@code result}. APK is considered verified only if there are no errors reported in the
-     * {@code result}.
+     * {@code result}. See {@link #verify(DataSource, ApkUtils.ZipSections, int, int)} for more
+     * information about the contract of this method.
+     *
+     * @param result result populated by this method with interesting information about the APK,
+     *        such as information about signers, and verification errors and warnings.
      */
     private static void verify(
             DataSource beforeApkSigningBlock,
@@ -133,12 +140,16 @@ public abstract class V2SchemeVerifier {
     }
 
     /**
-     * Parses each signer in the provided APK Signature Scheme v2 block and populates
+     * Parses each signer in the provided APK Signature Scheme v2 block and populates corresponding
      * {@code signerInfos} of the provided {@code result}.
      *
      * <p>This verifies signatures over {@code signed-data} block contained in each signer block.
      * However, this does not verify the integrity of the rest of the APK but rather simply reports
      * the expected digests of the rest of the APK (see {@code contentDigestsToVerify}).
+     *
+     * <p>This method adds one or more errors to the {@code result} if a verification error is
+     * expected to be encountered on an Android platform version in the
+     * {@code [minSdkVersion, maxSdkVersion]} range.
      */
     private static void parseSigners(
             ByteBuffer apkSignatureSchemeV2Block,
@@ -186,8 +197,13 @@ public abstract class V2SchemeVerifier {
      * Parses the provided signer block and populates the {@code result}.
      *
      * <p>This verifies signatures over {@code signed-data} contained in this block but does not
-     * verify the integrity of the rest of the APK. Rather, this method adds to the
-     * {@code contentDigestsToVerify}.
+     * verify the integrity of the rest of the APK. To facilitate APK integrity verification, this
+     * method adds the {@code contentDigestsToVerify}. These digests can then be used to verify the
+     * integrity of the APK.
+     *
+     * <p>This method adds one or more errors to the {@code result} if a verification error is
+     * expected to be encountered on an Android platform version in the
+     * {@code [minSdkVersion, maxSdkVersion]} range.
      */
     private static void parseSigner(
             ByteBuffer signerBlock,
@@ -388,13 +404,16 @@ public abstract class V2SchemeVerifier {
     }
 
     /**
-     * Returns the subset of signatures to be verified by the union of requested Android platform
-     * versions. Each Android platform version typically picks just one signature per signer to
-     * verify. However, because this method is dealing with more than one platform version, the
-     * result may be more than one signature.
+     * Returns the subset of signatures which are expected to be verified by at least one Android
+     * platform version in the {@code [minSdkVersion, maxSdkVersion]} range. The returned result is
+     * guaranteed to contain at least one signature.
      *
-     * @throws NoSupportedSignaturesException if no supported sigatures were found for some Android
-     *         platform version in the specific range.
+     * <p>Each Android platform version typically verifies exactly one signature from the provided
+     * {@code signatures} set. This method returns the set of these signatures collected over all
+     * requested platform versions. As a result, the result may contain more than one signature.
+     *
+     * @throws NoSupportedSignaturesException if no supported signatures were found for an Android
+     *         platform version in the range.
      */
     private static List<SupportedSignature> getSignaturesToVerify(
             List<SupportedSignature> signatures, int minSdkVersion, int maxSdkVersion)
@@ -462,8 +481,8 @@ public abstract class V2SchemeVerifier {
     }
 
     /**
-     * Returns positive number if {@code alg1} is preferred over {@code alg2}, {@code -1} if
-     * {@code alg2} is preferred over {@code alg1}, and {@code 0} if there is no preference.
+     * Returns a positive number if {@code alg1} is preferred over {@code alg2}, a negative number
+     * if {@code alg2} is preferred over {@code alg1}, or {@code 0} if there is no preference.
      */
     private static int compareContentDigestAlgorithm(
             ContentDigestAlgorithm alg1,
@@ -508,7 +527,16 @@ public abstract class V2SchemeVerifier {
     /**
      * Verifies integrity of the APK outside of the APK Signing Block by computing digests of the
      * APK and comparing them against the digests listed in APK Signing Block. The expected digests
-     * taken from {@code v2SchemeSignerInfos} of the provided {@code result}.
+     * are taken from {@code v2SchemeSignerInfos} of the provided {@code result}.
+     *
+     * <p>This method adds one or more errors to the {@code result} if a verification error is
+     * expected to be encountered on Android. No errors are added to the {@code result} if the APK's
+     * integrity is expected to verify on Android for each algorithm in
+     * {@code contentDigestAlgorithms}.
+     *
+     * <p>The reason this method is currently not parameterized by a
+     * {@code [minSdkVersion, maxSdkVersion]} range is that up until now content digest algorithms
+     * exhibit the same behavior on all Android platform versions.
      */
     private static void verifyIntegrity(
             DataSource beforeApkSigningBlock,
@@ -618,11 +646,17 @@ public abstract class V2SchemeVerifier {
     private static SignatureInfo findSignature(
             DataSource apk, ApkUtils.ZipSections zipSections, Result result)
                     throws IOException, SignatureNotFoundException {
-        // Find the APK Signing Block. The block immediately precedes the Central Directory.
-        ByteBuffer eocd = zipSections.getZipEndOfCentralDirectory();
-        Pair<DataSource, Long> apkSigningBlockAndOffset = findApkSigningBlock(apk, zipSections);
-        DataSource apkSigningBlock = apkSigningBlockAndOffset.getFirst();
-        long apkSigningBlockOffset = apkSigningBlockAndOffset.getSecond();
+        // Find the APK Signing Block.
+        DataSource apkSigningBlock;
+        long apkSigningBlockOffset;
+        try {
+            ApkUtils.ApkSigningBlock apkSigningBlockInfo =
+                    ApkUtils.findApkSigningBlock(apk, zipSections);
+            apkSigningBlockOffset = apkSigningBlockInfo.getStartOffset();
+            apkSigningBlock = apkSigningBlockInfo.getContents();
+        } catch (ApkSigningBlockNotFoundException e) {
+            throw new SignatureNotFoundException(e.getMessage(), e);
+        }
         ByteBuffer apkSigningBlockBuf =
                 apkSigningBlock.getByteBuffer(0, (int) apkSigningBlock.size());
         apkSigningBlockBuf.order(ByteOrder.LITTLE_ENDIAN);
@@ -630,78 +664,12 @@ public abstract class V2SchemeVerifier {
         // Find the APK Signature Scheme v2 Block inside the APK Signing Block.
         ByteBuffer apkSignatureSchemeV2Block =
                 findApkSignatureSchemeV2Block(apkSigningBlockBuf, result);
-
         return new SignatureInfo(
                 apkSignatureSchemeV2Block,
                 apkSigningBlockOffset,
                 zipSections.getZipCentralDirectoryOffset(),
                 zipSections.getZipEndOfCentralDirectoryOffset(),
-                eocd);
-    }
-
-    /**
-     * Returns the APK Signing Block and its offset in the provided APK.
-     *
-     * @throws SignatureNotFoundException if the APK does not contain an APK Signing Block
-     */
-    public static Pair<DataSource, Long> findApkSigningBlock(
-            DataSource apk, ApkUtils.ZipSections zipSections)
-                    throws IOException, SignatureNotFoundException {
-        // FORMAT:
-        // OFFSET       DATA TYPE  DESCRIPTION
-        // * @+0  bytes uint64:    size in bytes (excluding this field)
-        // * @+8  bytes payload
-        // * @-24 bytes uint64:    size in bytes (same as the one above)
-        // * @-16 bytes uint128:   magic
-
-        long centralDirStartOffset = zipSections.getZipCentralDirectoryOffset();
-        long centralDirEndOffset =
-                centralDirStartOffset + zipSections.getZipCentralDirectorySizeBytes();
-        long eocdStartOffset = zipSections.getZipEndOfCentralDirectoryOffset();
-        if (centralDirEndOffset != eocdStartOffset) {
-            throw new SignatureNotFoundException(
-                    "ZIP Central Directory is not immediately followed by End of Central Directory"
-                            + ". CD end: " + centralDirEndOffset
-                            + ", EoCD start: " + eocdStartOffset);
-        }
-
-        if (centralDirStartOffset < APK_SIG_BLOCK_MIN_SIZE) {
-            throw new SignatureNotFoundException(
-                    "APK too small for APK Signing Block. ZIP Central Directory offset: "
-                            + centralDirStartOffset);
-        }
-        // Read the magic and offset in file from the footer section of the block:
-        // * uint64:   size of block
-        // * 16 bytes: magic
-        ByteBuffer footer = apk.getByteBuffer(centralDirStartOffset - 24, 24);
-        footer.order(ByteOrder.LITTLE_ENDIAN);
-        if ((footer.getLong(8) != APK_SIG_BLOCK_MAGIC_LO)
-                || (footer.getLong(16) != APK_SIG_BLOCK_MAGIC_HI)) {
-            throw new SignatureNotFoundException(
-                    "No APK Signing Block before ZIP Central Directory");
-        }
-        // Read and compare size fields
-        long apkSigBlockSizeInFooter = footer.getLong(0);
-        if ((apkSigBlockSizeInFooter < footer.capacity())
-                || (apkSigBlockSizeInFooter > Integer.MAX_VALUE - 8)) {
-            throw new SignatureNotFoundException(
-                    "APK Signing Block size out of range: " + apkSigBlockSizeInFooter);
-        }
-        int totalSize = (int) (apkSigBlockSizeInFooter + 8);
-        long apkSigBlockOffset = centralDirStartOffset - totalSize;
-        if (apkSigBlockOffset < 0) {
-            throw new SignatureNotFoundException(
-                    "APK Signing Block offset out of range: " + apkSigBlockOffset);
-        }
-        ByteBuffer apkSigBlock = apk.getByteBuffer(apkSigBlockOffset, 8);
-        apkSigBlock.order(ByteOrder.LITTLE_ENDIAN);
-        long apkSigBlockSizeInHeader = apkSigBlock.getLong(0);
-        if (apkSigBlockSizeInHeader != apkSigBlockSizeInFooter) {
-            throw new SignatureNotFoundException(
-                    "APK Signing Block sizes in header and footer do not match: "
-                            + apkSigBlockSizeInHeader + " vs " + apkSigBlockSizeInFooter);
-        }
-        return Pair.of(apk.slice(apkSigBlockOffset, totalSize), apkSigBlockOffset);
+                zipSections.getZipEndOfCentralDirectory());
     }
 
     private static ByteBuffer findApkSignatureSchemeV2Block(
